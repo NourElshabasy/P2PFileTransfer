@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Text;
 using System.Threading;
-
+using System.Security.Cryptography;
 
 namespace P2PFileTransfer
 {
@@ -27,7 +27,7 @@ namespace P2PFileTransfer
             using (UdpClient udpClient = new UdpClient())
             {
                 udpClient.EnableBroadcast = true;
-                // Our secret handshake message
+                // Secret handshake message
                 byte[] requestData = Encoding.ASCII.GetBytes("P2P_APP_HI");
                 IPEndPoint endPoint = new IPEndPoint(IPAddress.Broadcast, 5001);
 
@@ -51,7 +51,7 @@ namespace P2PFileTransfer
                         byte[] receivedData = udpListener.Receive(ref remoteEndPoint);
                         string message = Encoding.ASCII.GetString(receivedData);
 
-                        // If we hear the secret handshake...
+                        // If we hear the secret handshake
                         if (message == "P2P_APP_HI")
                         {
                             string peerIp = remoteEndPoint.Address.ToString();
@@ -59,7 +59,7 @@ namespace P2PFileTransfer
                             // Safely update the UI thread
                             Application.Current.Dispatcher.Invoke(() =>
                             {
-                                // Add them to the list if they aren't already there
+                                // Add them to list if they are not already there
                                 if (!LstPeers.Items.Contains(peerIp))
                                 {
                                     LstPeers.Items.Add(peerIp);
@@ -76,36 +76,40 @@ namespace P2PFileTransfer
         private async void BtnReceive_Click(object sender, RoutedEventArgs e)
         {
             TxtStatus.Text = "Status: Listening on port 5000...";
-            BtnReceive.IsEnabled = false; // Prevent double-clicking
+            BtnReceive.IsEnabled = false;
 
-            // Run the listening loop in the background so the UI doesn't freeze
-            await Task.Run(() => StartListening());
+            // Wait for the file to finish downloading, and grab the hash it returns!
+            string receivedHash = await Task.Run(() => StartListening());
 
-            TxtStatus.Text = "Status: File received successfully!";
+            // Display the first 8 characters of the hash to prove it matches
+            TxtStatus.Text = $"Status: Received! Hash: {receivedHash.Substring(0, 8)}...";
             BtnReceive.IsEnabled = true;
         }
 
-        private void StartListening()
+        private string StartListening()
         {
             TcpListener listener = new TcpListener(IPAddress.Any, 5000);
             listener.Start();
 
-            // Wait here until a sender connects
             using (TcpClient client = listener.AcceptTcpClient())
             using (NetworkStream networkStream = client.GetStream())
-            using (FileStream fileStream = File.Create("received_file.dat"))
             {
-                // Copy all bytes from the network directly into the file
-                networkStream.CopyTo(fileStream);
-            }
+                // We wrap this in a block so the file closes BEFORE we try to hash it
+                using (FileStream fileStream = File.Create("received_file.dat")) 
+                {
+                    networkStream.CopyTo(fileStream);
+                }
+            } 
 
             listener.Stop();
+            
+            // Now that the file is fully saved and closed, generate the fingerprint!
+            return GetFileHash("received_file.dat");
         }
 
         // --- SENDER LOGIC ---
         private async void BtnSend_Click(object sender, RoutedEventArgs e)
         {
-            // This safely checks if it's null AND extracts it as a string variable called ipAddress
             if (LstPeers.SelectedItem is not string ipAddress)
             {
                 MessageBox.Show("Please select a peer from the list first!");
@@ -114,25 +118,26 @@ namespace P2PFileTransfer
 
             OpenFileDialog openFileDialog = new OpenFileDialog();
 
-            if (openFileDialog.ShowDialog() == true)
+            if (openFileDialog.ShowDialog() == true) 
             {
                 string filePath = openFileDialog.FileName;
-                // We don't need to grab the IP here anymore, it was grabbed in the 'if' statement above!
+                
+                // 1. Calculate the hash before sending
+                string fileHash = GetFileHash(filePath);
 
                 TxtStatus.Text = "Status: Sending file...";
                 BtnSend.IsEnabled = false;
-                TransferProgressBar.Value = 0; // This will reset the bar to 0%
+                TransferProgressBar.Value = 0; 
 
-                // Create a safe messenger to update the UI thread
-                var progress = new Progress<int>(percent =>
+                var progress = new Progress<int>(percent => 
                 {
                     TransferProgressBar.Value = percent;
                 });
 
-                // Pass messenger to background task
                 await Task.Run(() => SendFile(filePath, ipAddress, progress));
 
-                TxtStatus.Text = "Status: File sent successfully!";
+                // 2. Display the hash once it finishes sending
+                TxtStatus.Text = $"Status: Sent! Hash: {fileHash.Substring(0, 8)}...";
                 BtnSend.IsEnabled = true;
             }
         }
@@ -172,6 +177,18 @@ namespace P2PFileTransfer
                 {
                     MessageBox.Show("Transfer failed. Error: " + ex.Message);
                 });
+            }
+        }
+
+        // --- INTEGRITY LOGIC ---
+        private string GetFileHash(string filePath)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream stream = File.OpenRead(filePath))
+            {
+                byte[] hash = sha256.ComputeHash(stream);
+                // Convert the raw bytes into a readable hex string
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
             }
         }
     }
