@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "P2PFileTransfer/1.0.0": {
+        "runtime": {
+          "P2PFileTransfer.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "P2PFileTransfer/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
