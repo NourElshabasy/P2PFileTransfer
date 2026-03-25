@@ -28,7 +28,8 @@ namespace P2PFileTransfer
             {
                 udpClient.EnableBroadcast = true;
                 // Secret handshake message
-                byte[] requestData = Encoding.ASCII.GetBytes("P2P_APP_HI");
+                string broadcastMessage = "P2P_APP_HI|" + Environment.MachineName;
+                byte[] requestData = Encoding.UTF8.GetBytes(broadcastMessage);
                 IPEndPoint endPoint = new IPEndPoint(IPAddress.Broadcast, 5001);
 
                 while (true) // Run forever in the background
@@ -52,17 +53,20 @@ namespace P2PFileTransfer
                         string message = Encoding.ASCII.GetString(receivedData);
 
                         // If we hear the secret handshake
-                        if (message == "P2P_APP_HI")
+                        if (message.StartsWith("P2P_APP_HI|"))
                         {
+                            // Split message at | symbol and grab the second part
+                            string hostName = message.Split('|')[1];
                             string peerIp = remoteEndPoint.Address.ToString();
 
-                            // Safely update the UI thread
+                            // Combine into a string for the UI
+                            string displayText = $"{hostName} - {peerIp}";
+
                             Application.Current.Dispatcher.Invoke(() =>
                             {
-                                // Add them to list if they are not already there
-                                if (!LstPeers.Items.Contains(peerIp))
+                                if (!LstPeers.Items.Contains(displayText))
                                 {
-                                    LstPeers.Items.Add(peerIp);
+                                    LstPeers.Items.Add(displayText);
                                 }
                             });
                         }
@@ -75,15 +79,25 @@ namespace P2PFileTransfer
         // --- RECEIVER LOGIC ---
         private async void BtnReceive_Click(object sender, RoutedEventArgs e)
         {
-            TxtStatus.Text = "Status: Listening on port 5000...";
-            BtnReceive.IsEnabled = false;
+            try
+            {
+                TxtStatus.Text = "Status: Listening on port 5000...";
+                BtnReceive.IsEnabled = false;
 
-            // Wait for the file to finish downloading, and grab the hash it returns!
-            string receivedHash = await Task.Run(() => StartListening());
+                // The await pulls any errors from the background task so we can safe catch them
+                string receivedHash = await Task.Run(() => StartListening());
 
-            // Display the first 8 characters of the hash to prove it matches
-            TxtStatus.Text = $"Status: Received! Hash: {receivedHash.Substring(0, 8)}...";
-            BtnReceive.IsEnabled = true;
+                TxtStatus.Text = "Status: File received successfully!";
+                BtnReceive.IsEnabled = true;
+            }
+            catch (System.Exception ex)
+            {
+                // This stops crash and tells us what broke
+                MessageBox.Show("Receiver Error: " + ex.Message);
+
+                TxtStatus.Text = "Status: Transfer failed.";
+                BtnReceive.IsEnabled = true;
+            }
         }
 
         private string StartListening()
@@ -91,53 +105,79 @@ namespace P2PFileTransfer
             TcpListener listener = new TcpListener(IPAddress.Any, 5000);
             listener.Start();
 
+            string fullSavePath = "";
+
             using (TcpClient client = listener.AcceptTcpClient())
             using (NetworkStream networkStream = client.GetStream())
             {
-                // We wrap this in a block so the file closes BEFORE we try to hash it
-                using (FileStream fileStream = File.Create("received_file.dat")) 
+                string fileName = "";
+                long expectedLength = 0;
+
+                // We keep the BinaryReader open for the entire process now
+                using (BinaryReader reader = new BinaryReader(networkStream, Encoding.UTF8, leaveOpen: true))
                 {
-                    networkStream.CopyTo(fileStream);
+                    // Read Metadata
+                    fileName = reader.ReadString();
+                    expectedLength = reader.ReadInt64();
+
+                    // Create the path
+                    string downloadsFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+                    fullSavePath = Path.Combine(downloadsFolder, fileName);
+
+                    // Save the file using the reader's internal buffer
+                    using (FileStream fileStream = File.Create(fullSavePath))
+                    {
+                        byte[] buffer = new byte[8192];
+                        int bytesRead;
+                        long totalRead = 0;
+
+                        // Scoop bytes using reader.Read()
+                        while (totalRead < expectedLength && (bytesRead = reader.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            fileStream.Write(buffer, 0, bytesRead);
+                            totalRead += bytesRead;
+                        }
+                    }
                 }
-            } 
+            }
 
             listener.Stop();
-            
-            // Now that the file is fully saved and closed, generate the fingerprint!
-            return GetFileHash("received_file.dat");
+            return GetFileHash(fullSavePath);
         }
 
         // --- SENDER LOGIC ---
         private async void BtnSend_Click(object sender, RoutedEventArgs e)
         {
-            if (LstPeers.SelectedItem is not string ipAddress)
+            if (LstPeers.SelectedItem is not string selectedPeer)
             {
                 MessageBox.Show("Please select a peer from the list first!");
                 return;
             }
 
+            string ipAddress = selectedPeer.Split(" - ")[1];
+
             OpenFileDialog openFileDialog = new OpenFileDialog();
 
-            if (openFileDialog.ShowDialog() == true) 
+            if (openFileDialog.ShowDialog() == true)
             {
                 string filePath = openFileDialog.FileName;
-                
-                // 1. Calculate the hash before sending
+
+                // Calculate hash before sending
                 string fileHash = GetFileHash(filePath);
 
                 TxtStatus.Text = "Status: Sending file...";
                 BtnSend.IsEnabled = false;
-                TransferProgressBar.Value = 0; 
+                TransferProgressBar.Value = 0;
 
-                var progress = new Progress<int>(percent => 
+                var progress = new Progress<int>(percent =>
                 {
                     TransferProgressBar.Value = percent;
                 });
 
                 await Task.Run(() => SendFile(filePath, ipAddress, progress));
 
-                // 2. Display the hash once it finishes sending
-                TxtStatus.Text = $"Status: Sent! Hash: {fileHash.Substring(0, 8)}...";
+                // Display the hash once it finishes sending
+                TxtStatus.Text = "Status: File sent successfully!";
                 BtnSend.IsEnabled = true;
             }
         }
@@ -150,22 +190,24 @@ namespace P2PFileTransfer
                 using (NetworkStream networkStream = client.GetStream())
                 using (FileStream fileStream = File.OpenRead(filePath))
                 {
-                    // Create 8KB bucket to hold chunks of data
+                    // Send the metadata
+                    using (BinaryWriter writer = new BinaryWriter(networkStream, Encoding.UTF8, leaveOpen: true))
+                    {
+                        // Send the file's name
+                        writer.Write(Path.GetFileName(filePath));
+                        // Send the total size of the file
+                        writer.Write(fileStream.Length);
+                    }
+
                     byte[] buffer = new byte[8192];
                     int bytesRead;
                     long totalRead = 0;
-                    long fileLength = fileStream.Length; // Get total file size
+                    long fileLength = fileStream.Length;
 
-                    // Keep scooping 8KB chunks until the file is empty
                     while ((bytesRead = fileStream.Read(buffer, 0, buffer.Length)) > 0)
                     {
-                        // Pour the chunk into the network
                         networkStream.Write(buffer, 0, bytesRead);
-
-                        // Keep track of how much scooped
                         totalRead += bytesRead;
-
-                        // Calculate the percentage (0 to 100) and send it to the UI
                         int percentage = (int)((totalRead * 100) / fileLength);
                         progress.Report(percentage);
                     }
@@ -187,7 +229,7 @@ namespace P2PFileTransfer
             using (FileStream stream = File.OpenRead(filePath))
             {
                 byte[] hash = sha256.ComputeHash(stream);
-                // Convert the raw bytes into a readable hex string
+                // Convert raw bytes into readable hex string
                 return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
             }
         }
