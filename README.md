@@ -24,6 +24,8 @@ A lightweight and fast peer to peer file transfer application built in C# and WP
 1. Navigate to the **[Releases](https://github.com/NourElshabasy/P2PFileTransfer/releases)** tab on the right side of this GitHub page.
 2. Download the latest `P2PFileTransfer.exe` file.
 3. Double-click the `.exe` to run the application.
+4. If Windows promts "Windows Protected Your PC" click "more info" and then click "run anyway"
+
 ### Option 2: Run via .NET CLI
 If you have the .NET SDK installed, you can clone the repository and run the app directly from your terminal:
 ```bash
